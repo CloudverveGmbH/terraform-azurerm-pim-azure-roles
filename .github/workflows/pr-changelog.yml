@@ -1,0 +1,264 @@
+name: PR Changelog
+#
+# Runs on every PR update targeting main.
+#
+# WHAT IT DOES:
+#   1. Reads the <!-- KEEPACHANGELOG --> block from the PR description.
+#   2. If a bump:patch / bump:minor / bump:major label is present, pre-stamps
+#      the CHANGELOG heading with the computed next version and today's date.
+#      Without a bump label the heading stays as ## [Unreleased].
+#   3. Re-runs on label changes — if the bump label changes after the heading
+#      was already stamped (e.g. patch → major), the heading is rewritten
+#      to the new version.
+#   4. Commits the updated CHANGELOG.md back to the PR branch.
+#
+# NOTE: The version written here is what release.yml reads after merge to
+#       decide whether to create a tag and GitHub Release. PRs without a
+#       bump label (heading stays [Unreleased]) will not trigger a release.
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+      - labeled
+      - unlabeled
+      - ready_for_review
+    branches:
+      - main
+    paths:
+      - ".github/workflows/**"
+      - "**.tf"
+      - "**.tftest.hcl"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to re-stamp (e.g. 12). The PR must still be open."
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: pr-changelog-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  update-changelog:
+    name: Update CHANGELOG.md
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.draft == false &&
+       github.actor != 'github-actions[bot]')
+    steps:
+      - name: Resolve PR branch ref
+        id: pr-ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR_NUMBER="${{ github.event.inputs.pr_number }}"
+            BRANCH=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json headRefName -q '.headRefName')
+            echo "ref=${BRANCH}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout PR branch
+        uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6.0.2
+        with:
+          ref: ${{ steps.pr-ref.outputs.ref }}
+          fetch-depth: 0
+
+      # If the PR carries a bump label (bump:patch / bump:minor / bump:major),
+      # pre-compute the next version and use it as the CHANGELOG heading so
+      # CHANGELOG.md is already versioned before the PR is merged.
+      # Without a bump label the heading stays as ## [Unreleased].
+      - name: Compute changelog heading from PR labels
+        id: heading
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # For workflow_dispatch, fetch labels via API; for pull_request, use the event payload.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR_NUMBER="${{ github.event.inputs.pr_number }}"
+            LABELS_STR=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name' | tr '\n' ' ')
+          else
+            LABELS_STR=$(printf '%s' '${{ toJSON(github.event.pull_request.labels.*.name) }}' | jq -r '.[]' | tr '\n' ' ')
+          fi
+          echo "PR labels: $LABELS_STR"
+
+          BUMP=""
+          if echo "$LABELS_STR" | grep -q 'bump:major'; then BUMP=major
+          elif echo "$LABELS_STR" | grep -q 'bump:minor'; then BUMP=minor
+          elif echo "$LABELS_STR" | grep -q 'bump:patch'; then BUMP=patch
+          fi
+
+          if [ -z "$BUMP" ]; then
+            echo "No bump label — using [Unreleased] heading."
+            echo "heading=## [Unreleased]" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          LATEST=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n1)
+          if [ -z "$LATEST" ]; then LATEST="v0.0.0"; fi
+
+          MAJOR=$(echo "$LATEST" | sed 's/^v//' | cut -d. -f1)
+          MINOR=$(echo "$LATEST" | sed 's/^v//' | cut -d. -f2)
+          PATCH=$(echo "$LATEST" | sed 's/^v//' | cut -d. -f3)
+
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEXT="${MAJOR}.${MINOR}.${PATCH}"
+          DATE=$(date -u +%Y-%m-%d)
+          echo "Pre-stamping with version: $NEXT"
+          echo "heading=## [${NEXT}] - ${DATE}" >> "$GITHUB_ENV"
+
+      - name: Extract changelog block from PR body
+        id: extract
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # Fetch PR body — via API for workflow_dispatch, via env var for pull_request.
+          # (env var avoids shell injection from single-quotes / special chars in the body)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR_NUMBER="${{ github.event.inputs.pr_number }}"
+            gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json body -q '.body' > /tmp/pr_body.txt
+          else
+            printf '%s' "$PR_BODY" > /tmp/pr_body.txt
+          fi
+
+          # Extract lines between <!-- KEEPACHANGELOG --> and <!-- /KEEPACHANGELOG -->
+          awk '/<!--[[:space:]]*KEEPACHANGELOG[[:space:]]*-->/{found=1; next}
+               /<!--[[:space:]]*\/KEEPACHANGELOG[[:space:]]*-->/{found=0}
+               found { print }' /tmp/pr_body.txt \
+            | sed -e '/[^[:space:]]/,$!d' \
+            > /tmp/changelog_raw.txt
+
+          # Remove empty sub-sections: ### Heading followed only by a bare "-" or blank lines
+          awk '
+            /^### / {
+              if (heading != "" && !has_content) { heading = ""; next_lines = "" }
+              if (heading != "") { printf "%s", next_lines }
+              heading = $0
+              next_lines = $0 "\n"
+              has_content = 0
+              next
+            }
+            heading != "" {
+              if (/^[[:space:]]*$/ || /^-[[:space:]]*$/) {
+                next_lines = next_lines $0 "\n"
+              } else {
+                has_content = 1
+                next_lines = next_lines $0 "\n"
+              }
+              next
+            }
+            { print }
+            END {
+              if (heading != "" && has_content) printf "%s", next_lines
+            }
+          ' /tmp/changelog_raw.txt \
+            | sed -e '/[^[:space:]]/,$!d' -e 's/[[:space:]]*$//' \
+            > /tmp/changelog_filtered.txt
+
+          # Append PR link to every top-level bullet (lines starting with "- ")
+          PR_NUM="${{ github.event.inputs.pr_number }}${{ github.event.pull_request.number }}"
+          PR_URL="https://github.com/${{ github.repository }}/pull/${PR_NUM}"
+          PR_REF="([#${PR_NUM}](${PR_URL}))"
+          awk -v ref="$PR_REF" '
+            /^- / { sub(/[[:space:]]*$/, ""); print $0 " " ref; next }
+            { print }
+          ' /tmp/changelog_filtered.txt > /tmp/changelog_block.txt
+
+          if [ -s /tmp/changelog_block.txt ]; then
+            echo "no_markers=false" >> "$GITHUB_ENV"
+          else
+            echo "no_markers=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Warn if markers missing
+        if: env.no_markers == 'true'
+        run: |
+          {
+            echo "### ⚠️ CHANGELOG not updated — no markers in PR description"
+            echo ""
+            echo "Add the following block to your PR description:"
+            printf '```\n<!-- KEEPACHANGELOG -->\n### Added\n- describe your change here\n<!-- /KEEPACHANGELOG -->\n```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Update CHANGELOG block
+        if: env.no_markers == 'false'
+        run: |
+          HEADING="$heading"
+          PR_NUM="${{ github.event.inputs.pr_number }}${{ github.event.pull_request.number }}"
+
+          # Determine whether the top CHANGELOG block belongs to this PR:
+          #   1. Top heading is [Unreleased]                           → replace
+          #   2. Top block content already references #PR_NUM          → replace (re-run)
+          #   3. Top block belongs to a different PR / prior release   → prepend new block
+          TOP_HEADING=$(grep -m1 '^## \[' CHANGELOG.md || true)
+          TOP_BLOCK_REFS_THIS_PR=$(awk '/^## \[/{if(found) exit; found=1; next} found { print }' CHANGELOG.md \
+            | grep -c "\[#${PR_NUM}\]" || true)
+
+          if echo "$TOP_HEADING" | grep -qi '\[Unreleased\]' || [ "${TOP_BLOCK_REFS_THIS_PR}" -gt 0 ]; then
+            # Replace: drop the existing top block, write the new one in its place
+            awk -v hdg="$HEADING" '
+              /^## \[/ {
+                if (!done) {
+                  printing=1; done=1
+                  print hdg
+                  while ((getline line < "/tmp/changelog_block.txt") > 0) print line
+                  print ""
+                  next
+                }
+              }
+              done && /^## \[/ { printing=0 }
+              !printing { print }
+            ' CHANGELOG.md > /tmp/CHANGELOG.new
+          else
+            # Prepend: insert a new block before the existing top
+            awk -v hdg="$HEADING" '
+              /^## \[/ && !done {
+                done=1
+                print hdg
+                while ((getline line < "/tmp/changelog_block.txt") > 0) print line
+                print ""
+              }
+              { print }
+            ' CHANGELOG.md > /tmp/CHANGELOG.new
+          fi
+
+          mv /tmp/CHANGELOG.new CHANGELOG.md
+
+      - name: Commit CHANGELOG.md to PR branch
+        if: env.no_markers == 'false'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+
+          PR_REF="${{ steps.pr-ref.outputs.ref }}"
+          PR_NUM="${{ github.event.inputs.pr_number }}${{ github.event.pull_request.number }}"
+          if git diff --staged --quiet; then
+            echo "No CHANGELOG changes to commit."
+          else
+            git commit -m "chore: update CHANGELOG for PR #${PR_NUM}"
+            git push origin "HEAD:${PR_REF}"
+          fi
+
+      - name: PR summary
+        if: env.no_markers == 'false'
+        run: |
+          echo "### 📝 CHANGELOG updated from PR description" >> "$GITHUB_STEP_SUMMARY"
+          echo "Replaced \`[Unreleased]\` block in \`CHANGELOG.md\` with content from PR body." >> "$GITHUB_STEP_SUMMARY"

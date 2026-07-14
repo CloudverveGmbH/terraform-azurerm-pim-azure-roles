@@ -1,0 +1,5 @@
+# Global ownership – any unmatched file requires review from the platform team
+*                         @shentoza
+
+# Workflow changes always require maintainer review (pipeline hijacking protection)
+.github/workflows/        @shentoza

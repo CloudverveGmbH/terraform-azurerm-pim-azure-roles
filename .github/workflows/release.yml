@@ -1,0 +1,222 @@
+# Release — fires automatically when a PR is merged into main.
+#
+# FLOW:
+#   1. Read the topmost version heading from CHANGELOG.md.
+#      If it is [Unreleased] or already tagged → abort with a summary warning.
+#   2. Run the full Terraform test suite as a release gate.
+#   3. Create and push the git tag (v<version>).
+#   4. Create a GitHub Release with the CHANGELOG block for that version.
+#
+# HOW THE TERRAFORM REGISTRY WORKS:
+#   The public Terraform Registry (registry.terraform.io) is a PULL model.
+#   The Registry polls via a webhook configured once at:
+#     https://registry.terraform.io/ → Sign in with GitHub → Publish Module
+#   No registry token or `terraform publish` CLI command is required.
+#
+# PREREQUISITE (one-time, manual):
+#   1. Go to https://registry.terraform.io → Sign in with GitHub
+#   2. Publish → Modules → select the repo → webhook is created automatically
+#
+# PERMISSIONS:
+#   `contents: write` is required to push the git tag and create the GitHub Release.
+
+name: Release
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+env:
+  TF_VERSION: "1.11.4"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  # ── 0. Read version from CHANGELOG.md ────────────────────────────────────────
+  read-version:
+    name: Read version from CHANGELOG
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      tag: ${{ steps.parse.outputs.tag }}
+      should_run: ${{ steps.parse.outputs.should_run }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6.0.2
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Parse version from CHANGELOG.md
+        id: parse
+        run: |
+          set -euo pipefail
+
+          # Extract the first ## [...] heading
+          HEADING=$(grep -m1 '^## \[' CHANGELOG.md || true)
+          echo "Top CHANGELOG heading: ${HEADING}"
+
+          # Abort if still [Unreleased]
+          if echo "$HEADING" | grep -qi '\[Unreleased\]'; then
+            echo "CHANGELOG heading is still [Unreleased] — no release created."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ⚠️ Release skipped — CHANGELOG not stamped"
+              echo ""
+              echo "The top heading in \`CHANGELOG.md\` is still \`[Unreleased]\`."
+              echo "Add a \`bump:patch\`, \`bump:minor\`, or \`bump:major\` label to the PR"
+              echo "so that \`pr-changelog.yml\` stamps the version before merging."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Extract bare version number (e.g. "1.2.3" from "## [1.2.3] - 2026-07-01")
+          VERSION=$(echo "$HEADING" | sed -E 's/^## \[([^]]+)\].*/\1/')
+          TAG="v${VERSION}"
+          echo "Parsed version: ${VERSION}  →  tag: ${TAG}"
+
+          # Abort if tag already exists (idempotency guard)
+          if git tag --list "$TAG" | grep -q .; then
+            echo "Tag ${TAG} already exists — skipping release."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ℹ️ Release skipped — tag \`${TAG}\` already exists"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Semver regression guard: VERSION must be > latest existing tag
+          LATEST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n1 || true)
+          if [ -n "$LATEST_TAG" ]; then
+            LATEST_VER=$(echo "$LATEST_TAG" | sed 's/^v//')
+            HIGHEST=$(printf '%s\n%s' "$LATEST_VER" "$VERSION" | sort -V | tail -n1)
+            if [ "$HIGHEST" != "$VERSION" ]; then
+              echo "Version ${VERSION} is behind latest tag ${LATEST_TAG} — semver regression, aborting."
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              {
+                echo "### ⚠️ Release skipped — semver regression detected"
+                echo ""
+                echo "CHANGELOG version \`${VERSION}\` is lower than latest tag \`${LATEST_TAG}\`."
+                echo "Re-run \`PR Changelog\` on this PR to recompute the correct next version,"
+                echo "then update the CHANGELOG heading before merging."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}"         >> "$GITHUB_OUTPUT"
+          echo "should_run=true"    >> "$GITHUB_OUTPUT"
+
+  # ── 1. Tests must pass before any release is published ────────────────────────
+  test:
+    name: Tests (release gate)
+    runs-on: ubuntu-latest
+    needs: read-version
+    if: needs.read-version.outputs.should_run == 'true'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6.0.2
+        with:
+          ref: main
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@6231c69db2939d0201e3a32ba5d412196c077100 # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init (no backend)
+        run: terraform -chdir=examples/ci-validate init -backend=false
+
+      - name: Validate format
+        run: terraform fmt -check -recursive -diff
+
+      - name: Terraform validate
+        run: terraform -chdir=examples/ci-validate validate
+
+      - name: Terraform init — module root (for tests)
+        run: terraform init -backend=false
+
+      - name: Run Terraform tests
+        run: terraform test -verbose
+
+  # ── 2. Tag + GitHub Release ───────────────────────────────────────────────────
+  publish:
+    name: Tag and GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - read-version
+      - test
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6.0.2
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Create and push git tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ needs.read-version.outputs.tag }}" \
+            -m "Release ${{ needs.read-version.outputs.tag }}"
+          git push origin "${{ needs.read-version.outputs.tag }}"
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          VERSION="${{ needs.read-version.outputs.version }}"
+
+          # Match the block that starts with ## [<version>] and ends before the next ## [
+          awk -v ver="$VERSION" '
+            /^## \[/ {
+              if (found) exit
+              if (index($0, "[" ver "]") > 0) { found=1; next }
+            }
+            found { print }
+          ' CHANGELOG.md \
+            | sed -e '/[^[:space:]]/,$!d' -e 's/[[:space:]]*$//' \
+            > /tmp/release_notes.txt
+
+          echo "Extracted release notes for ${VERSION}:"
+          cat /tmp/release_notes.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ needs.read-version.outputs.tag }}
+          body_path: /tmp/release_notes.txt
+          append_body: true
+          body: |
+
+            ---
+
+            ### Usage
+            ```hcl
+            module "pim_azure_role" {
+              source  = "CloudverveGmbH/pim-azure-role/azurerm"
+              version = "${{ needs.read-version.outputs.version }}"
+
+              group_display_name = "AKS Cluster Admin"
+
+              role_assignments = [{
+                scope                = azurerm_kubernetes_cluster.aks.id
+                role_definition_name = "Azure Kubernetes Service RBAC Cluster Admin"
+                name                 = "aks-cluster-admin"
+              }]
+            }
+            ```
+
+            ### Requirements
+            - Terraform `>= 1.9`
+            - azuread provider `>= 3.0`
+            - azurerm provider `>= 4.0`
+            - time provider `>= 0.10`
