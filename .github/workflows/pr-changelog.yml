@@ -1,20 +1,8 @@
 name: PR Changelog
 #
 # Runs on every PR update targeting main.
-#
-# WHAT IT DOES:
-#   1. Reads the <!-- KEEPACHANGELOG --> block from the PR description.
-#   2. If a bump:patch / bump:minor / bump:major label is present, pre-stamps
-#      the CHANGELOG heading with the computed next version and today's date.
-#      Without a bump label the heading stays as ## [Unreleased].
-#   3. Re-runs on label changes — if the bump label changes after the heading
-#      was already stamped (e.g. patch → major), the heading is rewritten
-#      to the new version.
-#   4. Commits the updated CHANGELOG.md back to the PR branch.
-#
-# NOTE: The version written here is what release.yml reads after merge to
-#       decide whether to create a tag and GitHub Release. PRs without a
-#       bump label (heading stays [Unreleased]) will not trigger a release.
+# Reads <!-- KEEPACHANGELOG --> from the PR body, stamps CHANGELOG.md with the next version
+# (bump:patch/minor/major label), and commits back to the PR branch.
 
 on:
   pull_request:
@@ -75,16 +63,11 @@ jobs:
           ref: ${{ steps.pr-ref.outputs.ref }}
           fetch-depth: 0
 
-      # If the PR carries a bump label (bump:patch / bump:minor / bump:major),
-      # pre-compute the next version and use it as the CHANGELOG heading so
-      # CHANGELOG.md is already versioned before the PR is merged.
-      # Without a bump label the heading stays as ## [Unreleased].
       - name: Compute changelog heading from PR labels
         id: heading
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # For workflow_dispatch, fetch labels via API; for pull_request, use the event payload.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PR_NUMBER="${{ github.event.inputs.pr_number }}"
             LABELS_STR=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name' | tr '\n' ' ')
@@ -100,7 +83,6 @@ jobs:
           fi
 
           if [ -z "$BUMP" ]; then
-            echo "No bump label — using [Unreleased] heading."
             echo "heading=## [Unreleased]" >> "$GITHUB_ENV"
             exit 0
           fi
@@ -127,16 +109,13 @@ jobs:
         id: extract
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          # Fetch PR body — via API for workflow_dispatch, via env var for pull_request.
-          # (env var avoids shell injection from single-quotes / special chars in the body)
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PR_NUMBER="${{ github.event.inputs.pr_number }}"
-            gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json body -q '.body' > /tmp/pr_body.txt
           else
-            printf '%s' "$PR_BODY" > /tmp/pr_body.txt
+            PR_NUMBER="${{ github.event.pull_request.number }}"
           fi
+          gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json body -q '.body' > /tmp/pr_body.txt
 
           # Extract lines between <!-- KEEPACHANGELOG --> and <!-- /KEEPACHANGELOG -->
           awk '/<!--[[:space:]]*KEEPACHANGELOG[[:space:]]*-->/{found=1; next}
@@ -173,9 +152,8 @@ jobs:
             > /tmp/changelog_filtered.txt
 
           # Append PR link to every top-level bullet (lines starting with "- ")
-          PR_NUM="${{ github.event.inputs.pr_number }}${{ github.event.pull_request.number }}"
-          PR_URL="https://github.com/${{ github.repository }}/pull/${PR_NUM}"
-          PR_REF="([#${PR_NUM}](${PR_URL}))"
+          PR_URL="https://github.com/${{ github.repository }}/pull/${PR_NUMBER}"
+          PR_REF="([#${PR_NUMBER}](${PR_URL}))"
           awk -v ref="$PR_REF" '
             /^- / { sub(/[[:space:]]*$/, ""); print $0 " " ref; next }
             { print }
@@ -196,6 +174,7 @@ jobs:
             echo "Add the following block to your PR description:"
             printf '```\n<!-- KEEPACHANGELOG -->\n### Added\n- describe your change here\n<!-- /KEEPACHANGELOG -->\n```\n'
           } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
       - name: Update CHANGELOG block
         if: env.no_markers == 'false'

@@ -2,17 +2,6 @@
 
 _Briefly describe what this PR does._
 
-## Sibling module
-
-This module is one of a pair (`pim-azure-role` + `pim-entra-role`) that must stay
-behaviourally aligned. If your change touches shared logic (slug derivation, the
-two-group pattern, approver inference, activation policy), apply the equivalent
-change to the sibling module.
-
-- [ ] Change is module-specific, sibling not affected
-- [ ] Equivalent change applied to the sibling module
-- [ ] N/A
-
 ## Changelog
 
 Document the user-visible changes included in this PR in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
