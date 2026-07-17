@@ -1,4 +1,4 @@
-# pim-azure-role [![CI](https://github.com/CloudverveGmbH/terraform-azurerm-pim-azure-role/actions/workflows/ci.yml/badge.svg)](https://github.com/CloudverveGmbH/terraform-azurerm-pim-azure-role/actions/workflows/ci.yml)
+# pim-azure-role [![CI](https://github.com/CloudverveGmbH/terraform-azurerm-pim-azure-roles/actions/workflows/ci.yml/badge.svg)](https://github.com/CloudverveGmbH/terraform-azurerm-pim-azure-roles/actions/workflows/ci.yml)
 
 A reusable Terraform module that implements just-in-time access to Azure RBAC
 roles using Microsoft Entra Privileged Identity Management (PIM).
