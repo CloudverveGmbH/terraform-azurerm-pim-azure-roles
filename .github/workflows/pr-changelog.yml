@@ -102,6 +102,7 @@ jobs:
 
           NEXT="${MAJOR}.${MINOR}.${PATCH}"
           DATE=$(date -u +%Y-%m-%d)
+          echo "Pre-stamping with version: $NEXT"
           echo "heading=## [${NEXT}] - ${DATE}" >> "$GITHUB_ENV"
 
       - name: Extract changelog block from PR body
