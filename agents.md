@@ -32,7 +32,8 @@ and behave the same in both modules:
 | Role assignment | `azurerm_role_assignment` (0..n via `role_assignments`) | `azuread_directory_role_assignment` (single) |
 | Privileged group | plain security group | `assignable_to_role = true` |
 | Primary role input | `role_assignments[]` | `entra_role_display_name` |
-| `group_display_name` | **required** (no role name to derive from) | **optional** (derives from role name) |
+| `group_display_name` | **required** (no role name to derive from) | — |
+| `override_group_display_name` | — | **optional** override; when omitted slug is derived from `entra_role_display_name` |
 | `maximum_activation_duration` default | `PT8H` | `PT4H` |
 | Extra output | `role_assignment_ids` | `directory_role_assignment_id` |
 

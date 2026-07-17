@@ -170,6 +170,10 @@ resource "azurerm_role_assignment" "aks_admin_pim" {
 | `role_assignment_ids` | Map of Azure RBAC role assignment IDs, keyed by assignment name |
 | `resolved_approvers` | Approvers with their resolved PIM type after auto-inference |
 
+## AI Disclosure
+
+While the architecture and design decisions were made by a human, the code, tests, and documentation were mostly written with AI assistance. All technical content should be reviewed before use in production or critical environments.
+
 ---
 
 # pim-azure-role (Deutsch)
@@ -302,3 +306,7 @@ approvers = [
 ## Beitragen
 
 Siehe [CONTRIBUTING.md](CONTRIBUTING.md) für den PR-, Changelog- und Release-Prozess.
+
+## KI-Hinweis
+
+Architektur und Design-Entscheidungen stammen von einem Menschen; Code, Tests und Dokumentation wurden überwiegend mit KI-Unterstützung erstellt. Alle technischen Inhalte sollten vor produktivem Einsatz geprüft werden.
